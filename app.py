@@ -1,4 +1,5 @@
 import os
+import sys
 import uuid
 from typing import List, Dict, Optional
 
@@ -218,6 +219,16 @@ def main():
     ensure_dirs()
 
     st.set_page_config(page_title="AI Knowledge Assistant", page_icon="📚", layout="wide")
+
+    # Workaround: ensure sqlite is available in some managed environments
+    try:
+        import sqlite3  # noqa: F401
+    except Exception:
+        try:
+            import pysqlite3  # type: ignore
+            sys.modules["sqlite3"] = pysqlite3
+        except Exception:
+            pass
 
     # Inject CSS for mobile-friendly UI
     st.markdown(

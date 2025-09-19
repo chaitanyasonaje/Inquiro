@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 from typing import List
 
@@ -105,6 +106,15 @@ def build_or_update_chroma(splits: List):
 
 def main():
     ensure_dirs()
+    # Workaround: ensure sqlite is available in some managed environments
+    try:
+        import sqlite3  # noqa: F401
+    except Exception:
+        try:
+            import pysqlite3  # type: ignore
+            sys.modules["sqlite3"] = pysqlite3
+        except Exception:
+            pass
     print(f"[INFO] Loading documents from {DOCS_DIR} ...")
     docs = load_documents_from_dir(DOCS_DIR)
     if not docs:

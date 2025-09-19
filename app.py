@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 # LangChain core
 from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from chromadb.config import Settings as ChromaSettings  # type: ignore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -45,6 +46,7 @@ from langchain.callbacks.base import BaseCallbackHandler
 
 DB_DIR = os.path.join(".", "chroma_db")
 DOCS_DIR = os.path.join(".", "docs")
+FAISS_DIR = os.path.join(".", "faiss_index")
 
 
 def get_embeddings(api_key: Optional[str], gemini_key: Optional[str] = None):
@@ -94,12 +96,21 @@ def load_or_create_vectordb(embeddings):
         is_persistent=True,
         persist_directory=DB_DIR,
     )
-    return Chroma(
-        persist_directory=DB_DIR,
-        embedding_function=embeddings,
-        collection_name="documents",
-        client_settings=client_settings,
-    )
+    try:
+        return Chroma(
+            persist_directory=DB_DIR,
+            embedding_function=embeddings,
+            collection_name="documents",
+            client_settings=client_settings,
+        )
+    except Exception:
+        # Fallback to FAISS (load if exists)
+        if os.path.isdir(FAISS_DIR):
+            try:
+                return FAISS.load_local(FAISS_DIR, embeddings, allow_dangerous_deserialization=True)
+            except Exception:
+                return None
+        return None
 
 
 def add_uploaded_files_to_chroma(files, embeddings):
@@ -130,15 +141,66 @@ def add_uploaded_files_to_chroma(files, embeddings):
         chunk_overlap=200,
     )
     splits = splitter.split_documents(docs)
-    vectordb = load_or_create_vectordb(embeddings)
-    vectordb.add_documents(splits)
-    vectordb.persist()
-    return len(splits)
+    # Try Chroma first
+    try:
+        vectordb = load_or_create_vectordb(embeddings)
+        if vectordb is not None and hasattr(vectordb, "add_documents"):
+            vectordb.add_documents(splits)
+            # Persist if Chroma
+            if isinstance(vectordb, Chroma):
+                vectordb.persist()
+            else:
+                # FAISS instance returned from load; rebuild to include new docs and save
+                all_docs = splits
+                if os.path.isdir(FAISS_DIR):
+                    try:
+                        existing = FAISS.load_local(FAISS_DIR, embeddings, allow_dangerous_deserialization=True)
+                        # FAISS has no direct add_documents merge; rebuild from existing + new via index merge
+                        existing.add_documents(splits)
+                        existing.save_local(FAISS_DIR)
+                        return len(splits)
+                    except Exception:
+                        pass
+                faiss_vs = FAISS.from_documents(all_docs, embeddings)
+                os.makedirs(FAISS_DIR, exist_ok=True)
+                faiss_vs.save_local(FAISS_DIR)
+            return len(splits)
+        raise RuntimeError("Vector store unavailable")
+    except Exception:
+        # Fallback: FAISS index build
+        os.makedirs(FAISS_DIR, exist_ok=True)
+        try:
+            vs = None
+            if os.path.isdir(FAISS_DIR):
+                try:
+                    vs = FAISS.load_local(FAISS_DIR, embeddings, allow_dangerous_deserialization=True)
+                except Exception:
+                    vs = None
+            if vs is None:
+                vs = FAISS.from_documents(splits, embeddings)
+            else:
+                vs.add_documents(splits)
+            vs.save_local(FAISS_DIR)
+            return len(splits)
+        except Exception:
+            return 0
 
 
 def retrieve_context(query: str, embeddings, k: int = 4):
     vectordb = load_or_create_vectordb(embeddings)
-    return vectordb.similarity_search(query, k=k)
+    if vectordb is not None:
+        try:
+            return vectordb.similarity_search(query, k=k)
+        except Exception:
+            pass
+    # Fallback to FAISS direct
+    if os.path.isdir(FAISS_DIR):
+        try:
+            vs = FAISS.load_local(FAISS_DIR, embeddings, allow_dangerous_deserialization=True)
+            return vs.similarity_search(query, k=k)
+        except Exception:
+            return []
+    return []
 
 
 def format_sources(docs: List[Document]) -> str:
@@ -180,15 +242,25 @@ def generate_response(llm, prompt: str) -> str:
 
 
 def generate_summary(llm, embeddings) -> str:
-    vectordb = load_or_create_vectordb(embeddings)
-    # Pull a larger set of docs for summarization
+    # Try Chroma bulk get, else sample from FAISS
     try:
-        docs = vectordb.get(include=["documents", "metadatas"])  # type: ignore
-        raw_texts = docs.get("documents", []) if isinstance(docs, dict) else []
-        if not raw_texts:
-            return "No content available to summarize. Please upload or ingest documents."
-        # Concatenate a subset to respect token limits
-        joined = "\n\n".join([t for t in raw_texts[:20]])[:12000]
+        vectordb = load_or_create_vectordb(embeddings)
+        if isinstance(vectordb, Chroma):
+            docs = vectordb.get(include=["documents", "metadatas"])  # type: ignore
+            raw_texts = docs.get("documents", []) if isinstance(docs, dict) else []
+            if not raw_texts:
+                return "No content available to summarize. Please upload or ingest documents."
+            joined = "\n\n".join([t for t in raw_texts[:20]])[:12000]
+        else:
+            # FAISS: retrieve top-K using a broad query
+            if os.path.isdir(FAISS_DIR):
+                vs = FAISS.load_local(FAISS_DIR, embeddings, allow_dangerous_deserialization=True)
+                sample_docs = vs.similarity_search("summary of knowledge base", k=20)
+                if not sample_docs:
+                    return "No content available to summarize. Please upload or ingest documents."
+                joined = "\n\n".join([d.page_content for d in sample_docs])[:12000]
+            else:
+                return "No content available to summarize. Please upload or ingest documents."
         prompt = (
             "You are a concise summarizer. Create a clear, structured summary of the following knowledge base contents."
             " Use bullet points and short paragraphs.\n\n"

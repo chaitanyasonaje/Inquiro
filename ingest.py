@@ -10,6 +10,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.text_splitter import TokenTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from chromadb.config import Settings as ChromaSettings  # type: ignore
 
 # Embeddings
@@ -30,6 +31,7 @@ except Exception:
 
 DB_DIR = os.path.join(".", "chroma_db")
 DOCS_DIR = os.path.join(".", "docs")
+FAISS_DIR = os.path.join(".", "faiss_index")
 
 
 def ensure_dirs() -> None:
@@ -91,17 +93,35 @@ def build_or_update_chroma(splits: List):
         is_persistent=True,
         persist_directory=DB_DIR,
     )
-    # Create or load collection
-    vectordb = Chroma(
-        persist_directory=DB_DIR,
-        embedding_function=embeddings,
-        collection_name="documents",
-        client_settings=client_settings,
-    )
-    if splits:
-        vectordb.add_documents(splits)
-        vectordb.persist()
-    return vectordb
+    # Try Chroma; fallback to FAISS
+    try:
+        vectordb = Chroma(
+            persist_directory=DB_DIR,
+            embedding_function=embeddings,
+            collection_name="documents",
+            client_settings=client_settings,
+        )
+        if splits:
+            vectordb.add_documents(splits)
+            vectordb.persist()
+        return vectordb
+    except Exception:
+        os.makedirs(FAISS_DIR, exist_ok=True)
+        try:
+            if os.path.isdir(FAISS_DIR):
+                try:
+                    vs = FAISS.load_local(FAISS_DIR, embeddings, allow_dangerous_deserialization=True)
+                    vs.add_documents(splits)
+                    vs.save_local(FAISS_DIR)
+                    return vs
+                except Exception:
+                    pass
+            vs = FAISS.from_documents(splits, embeddings)
+            vs.save_local(FAISS_DIR)
+            return vs
+        except Exception as e:
+            print(f"[ERROR] Failed to build FAISS index: {e}")
+            return None
 
 
 def main():

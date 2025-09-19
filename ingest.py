@@ -9,6 +9,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.text_splitter import TokenTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import Chroma
+from chromadb.config import Settings as ChromaSettings  # type: ignore
 
 # Embeddings
 try:
@@ -84,11 +85,17 @@ def split_documents(docs: List):
 
 def build_or_update_chroma(splits: List):
     embeddings = get_embeddings()
+    client_settings = ChromaSettings(
+        anonymized_telemetry=False,
+        is_persistent=True,
+        persist_directory=DB_DIR,
+    )
     # Create or load collection
     vectordb = Chroma(
         persist_directory=DB_DIR,
         embedding_function=embeddings,
         collection_name="documents",
+        client_settings=client_settings,
     )
     if splits:
         vectordb.add_documents(splits)

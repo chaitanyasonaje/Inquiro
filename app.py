@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 # LangChain core
 from langchain_community.vectorstores import Chroma
+from chromadb.config import Settings as ChromaSettings  # type: ignore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 
@@ -87,10 +88,16 @@ def ensure_dirs():
 
 
 def load_or_create_vectordb(embeddings):
+    client_settings = ChromaSettings(
+        anonymized_telemetry=False,
+        is_persistent=True,
+        persist_directory=DB_DIR,
+    )
     return Chroma(
         persist_directory=DB_DIR,
         embedding_function=embeddings,
         collection_name="documents",
+        client_settings=client_settings,
     )
 
 
